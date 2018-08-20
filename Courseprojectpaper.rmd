@@ -1,0 +1,84 @@
+---
+ghtitle: "Machine Learning Course Project"
+author: "GSV Bemusement Park"
+date: "August 18, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r}
+setwd("C:/Users/Graham/Documents/Machine Learning")
+library(tidyverse)
+library(caret)
+library(rpart)
+library(rattle)
+
+training <- read_csv("pml-training.csv")
+```
+
+## Exploratory Analysis and Data cleaning
+
+NA values: Initial exploration found that a large number of columns in this dataset were overwhelmingly NA values. Of the 160 columns in the original training dataset, 158 were possible predictors (the first column of the set is a row index and the last column is classe, our response). Of these 158 possible predictors, 103 contained NA values, but only three of these 103 contained less than 97 percent NA values, and they all contained far less than 1 percent. Accordingly we used 1 percent NA values as our threshold for removing a column entirely before training the model. We'll also remove the column which serv
+```{r}
+training$classe %>% is.na %>% sum %>% print
+((training %>% is.na %>% colMeans) > 0) %>% sum %>% print
+((training %>% is.na %>% colMeans) > 0.01) %>% sum %>% print
+training <- training %>% select(which(colMeans(is.na(.)) < .01))
+```
+Only one row in the training set now includes any NA values, and in only three columns. In a dataset this size little is going to be gained by imputing the missing values, and little lost by omitting entirely this single observation, so we will delete it. Finally, we'll remove the first seven columns of the table (username, timestamps and the new window marker) as they are data about the experiment itself rather than about what we want to predict and it's easier to remove than in advance than to subset them every time we type out a formula.
+```{r}
+which(rowMeans(is.na(training)) > 0)
+which(is.na(training[which(rowMeans(is.na(training)) > 0),]) >  0)
+training <- training %>% filter(rowMeans(is.na(training)) == 0)
+training <- training %>% select(-(1:7))
+```
+#Modeling
+Now that we've pared out the obviously unhelpful parts of the dataset, let's see how well an extremely basic classifier can fit the data.
+```{r}
+rpfit <- train(classe ~ ., data = training , method = "rpart")
+rpfit$results
+```
+Even considering the entire dataset at once, this is barely coin-flip accuracy, and it actually gets *worse* under principal components analysis. I created four additional `Rpart` models along the lines above, with 20-fold and 200-fold cross-validation and then 20 and 200 bootstrap resamples, and none of these models delivered much more than a 1 percent improvement in classifier accuracy.
+```{r}
+rpfit2 <- train(classe ~ ., data = training, method = "rpart", trControl = trainControl("cv", 20))
+rpfit3 <- train(classe ~ ., data = training, method = "rpart", trControl = trainControl("cv", 200))
+rpfit4 <- train(classe ~ ., data = training, method = "rpart", trControl = trainControl("boot", 20))
+rpfit5 <- train(classe ~ ., data = training, method = "rpart", trControl = trainControl("boot", 200))
+rpfit4$results
+```
+But since this is definitely not the only classifying tool available to us, we'll create a few more models and rely on them to cover each other's weaknesses. Since we're doing supervised prediction here and the number of clusters to be identified is known, K-means clustering may also be useful.
+```{r}
+set.seed(24)
+kmfit <- kmeans(x = (training %>% select(-classe)), centers = 5, iter.max = 5000, nstart = 2000)
+table(kmfit$cluster, training$classe)
+```
+Unfortunately, despite thousands of attempts, we haven't generated any clusters here that match up at all well with the categories we want to identify. Every single cluster classifies wrongly more often than it classifies rightly, and no cluster even assigns a majority of its predictions to any one of the exercise categories. A striking match of individual clusters to known categories would be very informative, but we don't have one here.
+
+A third possible modeling approach that doesn't require a ridiculous amount of computing power is linear discriminant analysis. This one is almost as fast as the basic classification tree we ran at first, and less computationally intensive than growing a random forest, and it feels less brute force-y than the random forest. Does it offer an improvement over what we've tried so far?
+```{r}
+set.seed(60)
+ldfit <- train(classe ~ ., data = training, method = "lda", trControl = trainControl(method = "cv", number = 20))
+ldfit$results
+```
+At 70% accuracy on the training set, this model is considerably more accurate than our original classification tree. It's still not accurate enough for the 80% threshold of a passing grade, though, so we clearly can't rely on it alone.
+
+We now have two easily and quickly generated models which both fail to deliver sufficient predictive accuracy on our training set. Let's see if we can get an acceptable level of accuracy by combining them. As suggested by the course materials, we'll use a generalized additive model, which the `caret` package includes as a default method and is thus very simple for us to fit.
+```{r}
+sofar <- cbind(training$classe, predict(rpfit4), predict(ldfit))
+colnames(sofar) <- c("classe", "rp", "ld")
+combfit <- train(classe ~ ., data = sofar, method = "gam")
+combfit$results
+```
+This is actually *even* less accurate than flipping a coin, and much worse than either of its constituent models.
+
+At this point I'm getting a bit frustrated, as multiple models have failed to pull a useful level of predictive accuracy from this dataset even when considered jointly. Let's haul out the big guns and grow a random forest on this dataset. This is still a brute-force approach like cluster analysis or the original classification tree we created, but it's a different brute-force approach that might perform better. We'll use the `ranger` package as it runs significantly faster than the original `rf` method (I tried several times to grow the forest using `rf` and runtime exceeded 90 minutes without result; `ranger` crunched the entire dataset in less than twenty minutes.)
+```{r}
+set.seed(7)
+rffit <- train(classe ~ ., data = training, method = "ranger", trControl = trainControl(method = "cv", number = 12))
+print(mean(predict(rffit) == training$classe))
+```
+The random forest is ridiculously more accurate than anything else we've tried, achieving literally perfect accuracy on our training set. This model, with no assistance from others, simply can't be improved on (over the training set). Its predictions were also 100% accurate on the test set, so I decided to stop furthering modeling at this point.
+
+The random forest by itself was sufficient to brute-force the entirety of our prediction problem to well beyond the necessary threshold of accuracy, but it should be noted that there's no easy way to interpret its output. Linear models, LDA and individual decision  trees are all *much* easier to interpret, but the huge array of decision trees we generated don't actually provide any direct understanding of how the different exercise categories are distinguished.
